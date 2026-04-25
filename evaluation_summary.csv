@@ -1,0 +1,3 @@
+method,pass,partial,fail,refusal_correct
+TF-IDF baseline,1,4,10,1
+Final dual-channel,3,5,7,2
