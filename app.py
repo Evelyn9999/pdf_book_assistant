@@ -7,7 +7,8 @@ from PySide6.QtWidgets import (
 from pypdf import PdfReader
 
 from retriever_tfidf import TfidfRetriever
-from answerer import build_short_answer
+from answerer import build_short_answer, normalize_query_for_search
+from text_cleaner import clean_pdf_pages
 
 
 class PdfLoadWorker(QObject):
@@ -23,13 +24,20 @@ class PdfLoadWorker(QObject):
         try:
             reader = PdfReader(self.file_path)
             total_pages = max(len(reader.pages), 1)
-            pages = []
+            raw_page_texts = []
 
             for i, page in enumerate(reader.pages, start=1):
                 text = (page.extract_text() or "").strip()
-                pages.append({"page": i, "text": text})
+                raw_page_texts.append(text)
                 percent = int((i / total_pages) * 60)
                 self.progress.emit(percent, f"Reading pages ({i}/{total_pages})")
+
+            self.progress.emit(65, "Cleaning extracted text")
+            cleaned_texts = clean_pdf_pages(raw_page_texts)
+            pages = [
+                {"page": i + 1, "text": cleaned_texts[i] if i < len(cleaned_texts) else ""}
+                for i in range(total_pages)
+            ]
 
             chunks = []
             chunk_id = 0
@@ -188,9 +196,10 @@ class PdfAssistantApp(QWidget):
             self.answer_output.setPlainText("Please enter a question.")
             return
 
-        results = self.retriever.search(query, top_k=3)
+        search_query = normalize_query_for_search(query)
+        results = self.retriever.search(search_query, top_k=3)
 
-        short_answer = build_short_answer(results)
+        short_answer = build_short_answer(query, results)
         self.answer_output.setPlainText(short_answer)
 
         if not results:
