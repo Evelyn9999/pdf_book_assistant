@@ -218,8 +218,59 @@ def _rank_definition_sentences(query: str, sentences: list[str]) -> list[tuple[f
     return weighted
 
 
-def _pick_definition_answer(query: str, sentences: list[str]) -> str:
-    ranked = _rank_definition_sentences(query, sentences)
+def _split_first_sentences(text: str, limit: int = 5) -> list[str]:
+    cleaned = _clean_text(text)
+    sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", cleaned) if s.strip()]
+    return sentences[:limit]
+
+
+def _topic_terms_for_definition(query: str) -> set[str]:
+    subject = _extract_question_subject(query)
+    return _tokenize_for_match(subject if subject else query)
+
+
+def _definition_target_chunks(query: str, results: list[dict], all_chunks: list[dict] | None) -> list[dict]:
+    topic_terms = _topic_terms_for_definition(query)
+    if not topic_terms:
+        return results[:3]
+
+    pool = all_chunks if all_chunks else results
+    matched = []
+    for chunk in pool:
+        title_blob = " ".join(
+            [
+                str(chunk.get("section_title", "") or ""),
+                str(chunk.get("chapter_title", "") or ""),
+            ]
+        )
+        title_terms = _tokenize_for_match(title_blob)
+        overlap = len(topic_terms & title_terms)
+        if overlap > 0:
+            matched.append((overlap, chunk))
+
+    if matched:
+        matched.sort(key=lambda x: x[0], reverse=True)
+        return [item[1] for item in matched[:6]]
+
+    return results[:3]
+
+
+def _pick_definition_answer(query: str, sentences: list[str], results: list[dict], all_chunks: list[dict] | None) -> str:
+    target_chunks = _definition_target_chunks(query, results, all_chunks)
+    lead_candidates: list[str] = []
+    seen = set()
+    for chunk in target_chunks:
+        for sentence in _split_first_sentences(str(chunk.get("text", "") or ""), limit=5):
+            key = sentence.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            if _is_noise_sentence(sentence):
+                continue
+            lead_candidates.append(sentence)
+
+    ranked_pool = lead_candidates if lead_candidates else sentences
+    ranked = _rank_definition_sentences(query, ranked_pool)
     subject = _extract_question_subject(query).lower().strip()
     if subject:
         # Prefer definition sentences where subject appears near sentence start:
@@ -609,7 +660,7 @@ def build_short_answer_with_debug(
     q_type = classify_question_type(query)
 
     if q_type == "definition":
-        answer = _pick_definition_answer(query, candidates)
+        answer = _pick_definition_answer(query, candidates, results, all_chunks)
     elif q_type == "location":
         answer = _pick_location_answer(query, results, candidates)
     elif q_type == "count":
