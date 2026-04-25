@@ -6,6 +6,7 @@ from PySide6.QtWidgets import (
 )
 from pypdf import PdfReader
 
+from chunker import chunk_pages
 from retriever_tfidf import TfidfRetriever
 from answerer import build_short_answer, normalize_query_for_search
 from text_cleaner import clean_pdf_pages
@@ -39,33 +40,13 @@ class PdfLoadWorker(QObject):
                 for i in range(total_pages)
             ]
 
-            chunks = []
-            chunk_id = 0
-            chunk_size = 800
-            overlap = 100
-
-            total_page_items = max(len(pages), 1)
-            for page_idx, page_data in enumerate(pages, start=1):
-                page_num = page_data["page"]
-                text = page_data["text"]
-                if text:
-                    start = 0
-                    while start < len(text):
-                        end = start + chunk_size
-                        chunk_text = text[start:end].strip()
-                        if chunk_text:
-                            chunks.append(
-                                {
-                                    "chunk_id": chunk_id,
-                                    "page": page_num,
-                                    "text": chunk_text,
-                                }
-                            )
-                            chunk_id += 1
-                        start += chunk_size - overlap
-
-                percent = 60 + int((page_idx / total_page_items) * 30)
-                self.progress.emit(percent, f"Creating chunks ({page_idx}/{total_page_items})")
+            self.progress.emit(75, "Creating semantic chunks")
+            chunks = chunk_pages(
+                pages,
+                min_words=400,
+                max_words=800,
+                overlap_words=75,
+            )
 
             retriever = TfidfRetriever()
             self.progress.emit(95, "Building search index")

@@ -42,8 +42,6 @@ def _remove_repeated_header_footer_lines(pages_lines: list[list[str]]) -> list[l
         return pages_lines
 
     edge_counter: Counter[str] = Counter()
-    edge_map: dict[str, str] = {}
-
     for lines in pages_lines:
         if not lines:
             continue
@@ -52,7 +50,6 @@ def _remove_repeated_header_footer_lines(pages_lines: list[list[str]]) -> list[l
             key = _normalize_line_for_repeat_check(line)
             if key:
                 edge_counter[key] += 1
-                edge_map[key] = line
 
     # Repeated edge lines across many pages are likely headers/footers.
     threshold = max(3, int(len(pages_lines) * 0.2))
@@ -96,10 +93,20 @@ def clean_pdf_pages(page_texts: list[str]) -> list[str]:
 
     cleaned_pages = []
     for lines in cleaned_lines_per_page:
-        # Merge line breaks inside page content.
-        page_text = " ".join(lines)
-        # Final whitespace normalization.
-        page_text = re.sub(r"\s+", " ", page_text).strip()
+        # Rebuild lightweight paragraph boundaries before chunking.
+        paragraphs = []
+        current = []
+        for line in lines:
+            current.append(line)
+            if re.search(r"[.!?]$", line) and len(current) >= 2:
+                paragraphs.append(" ".join(current))
+                current = []
+
+        if current:
+            paragraphs.append(" ".join(current))
+
+        normalized_paragraphs = [re.sub(r"\s+", " ", p).strip() for p in paragraphs if p.strip()]
+        page_text = "\n\n".join(normalized_paragraphs).strip()
         cleaned_pages.append(page_text)
 
     return cleaned_pages
