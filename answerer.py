@@ -110,9 +110,25 @@ def _is_system_style_query(query: str) -> bool:
     return any(re.search(p, q) for p in patterns)
 
 
+def _is_general_knowledge_query(query: str) -> bool:
+    q = query.strip().lower()
+    patterns = [
+        r"\bcapital of\b",
+        r"\bpopulation of\b",
+        r"\bpresident of\b",
+        r"\bprime minister of\b",
+        r"\bweather in\b",
+        r"\bcurrency of\b",
+        r"\bwhere is\b.+\bcountry\b",
+    ]
+    return any(re.search(p, q) for p in patterns)
+
+
 def domain_gate_with_reason(query: str, results: list[dict], all_chunks: list[dict] | None = None) -> tuple[bool, str]:
     if _is_system_style_query(query):
         return False, "domain_system_query"
+    if _is_general_knowledge_query(query):
+        return False, "domain_general_knowledge_query"
 
     query_terms = _tokenize_for_match(query)
     if len(query_terms) < 2:
@@ -135,6 +151,10 @@ def domain_gate_with_reason(query: str, results: list[dict], all_chunks: list[di
         return False, "domain_no_overlap"
     if title_overlap == 0 and content_overlap <= 1 and len(query_terms) >= 4:
         return False, "domain_low_overlap"
+    # Require minimal overlap ratio for longer queries.
+    overlap_ratio = max(title_overlap, content_overlap) / max(1, len(query_terms))
+    if len(query_terms) >= 5 and overlap_ratio < 0.2:
+        return False, "domain_low_overlap_ratio"
 
     return True, "domain_ok"
 
@@ -235,6 +255,11 @@ def _definition_target_chunks(query: str, results: list[dict], all_chunks: list[
         return results[:3]
 
     pool = all_chunks if all_chunks else results
+    subject = _extract_question_subject(query).strip().lower()
+    # Keep core subject terms for strict title locking.
+    strict_terms = [t for t in _tokenize_for_match(subject) if len(t) >= 3]
+    acronym_terms = [t for t in strict_terms if t.isupper() or len(t) <= 4]
+
     matched = []
     for chunk in pool:
         title_blob = " ".join(
@@ -245,11 +270,19 @@ def _definition_target_chunks(query: str, results: list[dict], all_chunks: list[
         )
         title_terms = _tokenize_for_match(title_blob)
         overlap = len(topic_terms & title_terms)
+        # Definition lock: for acronym-like topics (HTTP/TCP), require exact title hit.
+        if acronym_terms:
+            title_lower = title_blob.lower()
+            if not any(term.lower() in title_lower for term in acronym_terms):
+                continue
+        # For non-acronym topics, require at least one strong subject token in title.
+        elif strict_terms and not any(term.lower() in title_blob.lower() for term in strict_terms):
+            continue
         if overlap > 0:
             matched.append((overlap, chunk))
 
     if matched:
-        matched.sort(key=lambda x: x[0], reverse=True)
+        matched.sort(key=lambda x: (x[0], -int(x[1].get("page", 10**9))), reverse=True)
         return [item[1] for item in matched[:6]]
 
     return results[:3]

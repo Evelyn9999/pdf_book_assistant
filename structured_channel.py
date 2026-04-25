@@ -113,15 +113,24 @@ def _handle_location(query: str, chunks: list[dict]) -> tuple[bool, str, str, li
 
 
 def _handle_overview(query: str, chunks: list[dict]) -> tuple[bool, str, str, list[dict]]:
+    q = query.lower()
     cue_patterns = [r"\bin this book\b", r"\bthis chapter\b", r"\boverview\b", r"\bintroduction\b", r"\bpreface\b"]
     candidates = []
+    chapter_specific_match = re.search(r"\bchapter\s+(\d+)\b", q)
+    target_chapter = int(chapter_specific_match.group(1)) if chapter_specific_match else None
+
     for chunk in chunks:
         title_blob = " ".join(
             [str(chunk.get("chapter_title", "") or ""), str(chunk.get("section_title", "") or "")]
         ).lower()
         text = str(chunk.get("text", "") or "")
+        if target_chapter is not None and chunk.get("chapter_number") != target_chapter:
+            continue
         title_hit = any(k in title_blob for k in ["overview", "preface", "introduction", "summary"])
         cue_hit = any(re.search(p, text.lower()) for p in cue_patterns)
+        # "What does the book do/about" should prioritize explicit "This book..." / "In this book..."
+        if "what does the book do" in q or "what is this book about" in q:
+            cue_hit = cue_hit or bool(re.search(r"\b(this book|in this book)\b", text.lower()))
         if title_hit or cue_hit:
             candidates.append(chunk)
     if not candidates:
