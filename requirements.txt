@@ -1,0 +1,3 @@
+pypdf
+scikit-learn
+PySide6
