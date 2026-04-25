@@ -127,55 +127,142 @@ def _rank_sentences_extractively(query: str, sentences: list[str]) -> list[tuple
     return ranked
 
 
-def _pick_definition_answer(query: str, sentences: list[str]) -> str:
+def _rank_definition_sentences(query: str, sentences: list[str]) -> list[tuple[float, str]]:
+    base_ranked = _rank_sentences_extractively(query, sentences)
+    if not base_ranked:
+        return []
+
     subject = _extract_question_subject(query)
     subject_terms = _tokenize_for_match(subject if subject else query)
-    if not subject_terms:
-        ranked = _rank_sentences_extractively(query, sentences)
-        return ranked[0][1] if ranked else ""
+    subject_text = subject.lower().strip() if subject else ""
 
-    def_sentences = []
-    for sentence in sentences:
+    weighted: list[tuple[float, str]] = []
+    for base_score, sentence in base_ranked:
         lower = sentence.lower()
-        if not any(k in lower for k in [" is ", " are ", " refers to ", "defined as"]):
-            continue
         sent_terms = _tokenize_for_match(sentence)
-        overlap = len(sent_terms & subject_terms)
-        if overlap == 0:
-            continue
-        def_sentences.append((overlap, sentence))
+        overlap = len(sent_terms & subject_terms) / max(1, len(subject_terms))
+        bonus = 0.0
 
-    if def_sentences:
-        def_sentences.sort(key=lambda x: x[0], reverse=True)
-        return def_sentences[0][1]
+        if subject_text and subject_text in lower:
+            bonus += 0.35
+        if re.search(r"\b(is|are)\b", lower):
+            bonus += 0.2
+        if " refers to " in lower or "defined as" in lower:
+            bonus += 0.3
+        if re.search(r"^(an?\s+)?[a-z0-9 _-]+\s+is\b", lower):
+            bonus += 0.2
+        if overlap >= 0.6:
+            bonus += 0.2
 
-    ranked = _rank_sentences_extractively(query, sentences)
+        weighted.append((base_score + bonus, sentence))
+
+    weighted.sort(key=lambda x: x[0], reverse=True)
+    return weighted
+
+
+def _pick_definition_answer(query: str, sentences: list[str]) -> str:
+    ranked = _rank_definition_sentences(query, sentences)
     return ranked[0][1] if ranked else ""
+
+
+def _extract_chapter_title(text: str) -> str:
+    patterns = [
+        r"\bchapter\s+\d+\s*[:\-]?\s*([a-zA-Z][^.;\n]{4,120})",
+        r"\bch\.\s*\d+\s*[:\-]?\s*([a-zA-Z][^.;\n]{4,120})",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if match:
+            return match.group(1).strip(" -:;,.")
+    return ""
 
 
 def _pick_location_answer(query: str, results: list[dict], sentences: list[str]) -> str:
     if not results:
         return "No relevant location was found."
 
-    top_pages = [str(item.get("page", "")) for item in results[:3] if item.get("page") is not None]
-    pages_text = ", ".join(top_pages) if top_pages else "unknown pages"
-
     ranked = _rank_sentences_extractively(query, sentences)
-    if ranked:
-        best_sentence = ranked[0][1]
-        return f"This topic is discussed around page(s): {pages_text}. Most relevant passage: {best_sentence}"
+    best_sentence = ranked[0][1] if ranked else _clean_text(results[0].get("text", ""))[:180]
 
-    return f"This topic is discussed around page(s): {pages_text}."
+    top_result = results[0]
+    page = top_result.get("page", "unknown")
+    title = _extract_chapter_title(top_result.get("text", "")) or _extract_chapter_title(best_sentence)
+    if not title:
+        title = "No explicit chapter title found"
+
+    snippet = best_sentence.strip()
+    return f"Chapter/Section: {title} | Page: {page} | Snippet: {snippet}"
+
+
+def _word_to_int(token: str) -> int | None:
+    number_words = {
+        "one": 1,
+        "two": 2,
+        "three": 3,
+        "four": 4,
+        "five": 5,
+        "six": 6,
+        "seven": 7,
+        "eight": 8,
+        "nine": 9,
+        "ten": 10,
+        "eleven": 11,
+        "twelve": 12,
+        "thirteen": 13,
+        "fourteen": 14,
+        "fifteen": 15,
+        "sixteen": 16,
+        "seventeen": 17,
+        "eighteen": 18,
+        "nineteen": 19,
+        "twenty": 20,
+    }
+    token = token.lower().strip()
+    if token.isdigit():
+        return int(token)
+    return number_words.get(token)
+
+
+def _extract_count_evidence(sentences: list[str]) -> tuple[list[int], list[str]]:
+    values: list[int] = []
+    evidence: list[str] = []
+    count_patterns = [
+        r"\b(?:first|last|next)\s+(\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\b",
+        r"\b(\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\s+(?:chapters?|parts?)\b",
+    ]
+
+    for sentence in sentences:
+        lower = sentence.lower()
+        if "chapter" not in lower and "part" not in lower:
+            continue
+        found = False
+        for pattern in count_patterns:
+            for match in re.findall(pattern, lower):
+                value = _word_to_int(match)
+                if value is not None:
+                    values.append(value)
+                    found = True
+        if found:
+            evidence.append(sentence)
+
+    return values, evidence
 
 
 def _pick_count_answer(query: str, results: list[dict], sentences: list[str]) -> str:
-    # Rule-based extraction for "how many / number of" style questions.
+    values, evidence = _extract_count_evidence(sentences)
+    if len(values) >= 2:
+        total = sum(values[:2])
+        return f"{evidence[0]} {evidence[1]} This suggests a total of about {total}."
+
+    if len(values) == 1:
+        return f"{evidence[0]} This indicates a count of about {values[0]}."
+
+    # Fallback: choose sentence with most numeric evidence.
     candidates = []
     for sentence in sentences:
-        nums = re.findall(r"\b\d+\b", sentence)
-        if nums:
-            candidates.append((len(nums), sentence))
-
+        score = len(re.findall(r"\b\d+\b", sentence))
+        if score > 0:
+            candidates.append((score, sentence))
     if candidates:
         candidates.sort(key=lambda x: x[0], reverse=True)
         return candidates[0][1]
