@@ -180,7 +180,7 @@ class PdfAssistantApp(QWidget):
         search_query = normalize_query_for_search(query)
         results = self.retriever.search(search_query, top_k=3)
 
-        short_answer = build_short_answer(query, results)
+        short_answer = build_short_answer(query, results, self.retriever.chunks)
         self.answer_output.setPlainText(short_answer)
 
         if not results:

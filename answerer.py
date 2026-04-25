@@ -11,7 +11,17 @@ def classify_question_type(query: str) -> str:
     location_patterns = [r"\bwhere\b", r"\bwhich chapter\b", r"\bwhich page\b"]
     count_patterns = [r"\bhow many\b", r"\bnumber of\b"]
     summary_patterns = [r"\bsummarize\b", r"\bsummary of\b", r"\bmainly discuss\b"]
+    overview_patterns = [
+        r"\bwhat is this book about\b",
+        r"\bwhat does the book do\b",
+        r"\bwhat does this chapter cover\b",
+        r"\boverview\b",
+        r"\bpreface\b",
+        r"\bintroduction\b",
+    ]
 
+    if any(re.search(p, q) for p in overview_patterns):
+        return "overview"
     if any(re.search(p, q) for p in summary_patterns):
         return "summary"
     if any(re.search(p, q) for p in count_patterns):
@@ -162,6 +172,25 @@ def _rank_definition_sentences(query: str, sentences: list[str]) -> list[tuple[f
 
 def _pick_definition_answer(query: str, sentences: list[str]) -> str:
     ranked = _rank_definition_sentences(query, sentences)
+    subject = _extract_question_subject(query).lower().strip()
+    if subject:
+        # Prefer definition sentences where subject appears near sentence start:
+        # "HTTP is ...", "A computer network is ...", "TCP refers to ..."
+        start_biased = []
+        for score, sentence in ranked:
+            lower = sentence.lower().strip()
+            lead_patterns = [
+                rf"^(?:an?\s+|the\s+)?{re.escape(subject)}\s+(?:is|are)\b",
+                rf"^(?:an?\s+|the\s+)?{re.escape(subject)}\s+refers to\b",
+                rf"^(?:an?\s+|the\s+)?{re.escape(subject)}\s+can be defined as\b",
+            ]
+            lead_bonus = 0.0
+            if any(re.search(p, lower) for p in lead_patterns):
+                lead_bonus = 0.5
+            start_biased.append((score + lead_bonus, sentence))
+        start_biased.sort(key=lambda x: x[0], reverse=True)
+        ranked = start_biased
+
     return ranked[0][1] if ranked else ""
 
 
@@ -184,7 +213,21 @@ def _pick_location_answer(query: str, results: list[dict], sentences: list[str])
     ranked = _rank_sentences_extractively(query, sentences)
     best_sentence = ranked[0][1] if ranked else _clean_text(results[0].get("text", ""))[:180]
 
-    top_result = results[0]
+    # Prefer results whose chapter/section title text matches query terms.
+    query_terms = _tokenize_for_match(query)
+    scored_results = []
+    for r in results:
+        title_blob = " ".join(
+            [
+                str(r.get("chapter_title", "") or ""),
+                str(r.get("section_title", "") or ""),
+            ]
+        ).lower()
+        title_terms = _tokenize_for_match(title_blob)
+        title_overlap = len(query_terms & title_terms)
+        scored_results.append((title_overlap, float(r.get("score", 0.0)), r))
+    scored_results.sort(key=lambda x: (x[0], x[1]), reverse=True)
+    top_result = scored_results[0][2] if scored_results else results[0]
     page = top_result.get("page", "unknown")
     chapter_num = top_result.get("chapter_number")
     chapter_title = (top_result.get("chapter_title") or "").strip()
@@ -211,7 +254,10 @@ def _pick_location_answer(query: str, results: list[dict], sentences: list[str])
         section_label = "N/A"
 
     snippet = best_sentence.strip()
-    return f"Chapter: {chapter_label} | Section: {section_label} | Page: {page} | Snippet: {snippet}"
+    return (
+        f"The topic is discussed in {chapter_label}, section {section_label}, "
+        f"especially around page {page}. Snippet: {snippet}"
+    )
 
 
 def _word_to_int(token: str) -> int | None:
@@ -268,7 +314,42 @@ def _extract_count_evidence(sentences: list[str]) -> tuple[list[int], list[str]]
     return values, evidence
 
 
-def _pick_count_answer(query: str, results: list[dict], sentences: list[str]) -> str:
+def _pick_count_answer(query: str, results: list[dict], sentences: list[str], all_chunks: list[dict] | None) -> str:
+    q = query.lower()
+    # Strategy C: Prefer structure statistics over semantic retrieval.
+    if all_chunks:
+        chapter_numbers = sorted(
+            {
+                int(chunk["chapter_number"])
+                for chunk in all_chunks
+                if chunk.get("chapter_number") is not None and str(chunk.get("chapter_number")).isdigit()
+            }
+        )
+        if "how many chapters" in q or "number of chapters" in q:
+            if chapter_numbers:
+                return (
+                    f"By scanning chapter headings across the book structure, there are "
+                    f"{len(chapter_numbers)} chapter(s) (chapters: {', '.join(map(str, chapter_numbers))})."
+                )
+            return "I could not detect chapter headings reliably from the extracted structure."
+
+        chapter_match = re.search(r"\bchapter\s+(\d+)\b", q)
+        if chapter_match and ("how many sections" in q or "number of sections" in q):
+            target_ch = int(chapter_match.group(1))
+            section_numbers = sorted(
+                {
+                    str(chunk.get("section_number"))
+                    for chunk in all_chunks
+                    if chunk.get("chapter_number") == target_ch and chunk.get("section_number")
+                }
+            )
+            if section_numbers:
+                return (
+                    f"In chapter {target_ch}, I can identify about {len(section_numbers)} section(s): "
+                    f"{', '.join(section_numbers)}."
+                )
+            return f"I could not find section-number headings for chapter {target_ch} in extracted structure."
+
     chapter_numbers = sorted(
         {
             int(item["chapter_number"])
@@ -327,7 +408,48 @@ def _pick_summary_answer(query: str, sentences: list[str]) -> str:
     return " ".join(summary_sents)
 
 
-def build_short_answer(query: str, results: list[dict]) -> str:
+def _pick_book_overview_answer(query: str, results: list[dict], all_chunks: list[dict] | None) -> str:
+    overview_keywords = ("preface", "introduction", "overview", "summary")
+    cue_patterns = [
+        r"\bin this book\b",
+        r"\bthis chapter\b",
+        r"\bwe (?:will|introduce|discuss|present|cover)\b",
+    ]
+
+    candidate_texts = []
+    search_pool = all_chunks if all_chunks else results
+    for item in search_pool:
+        ch_title = str(item.get("chapter_title", "") or "").lower()
+        sec_title = str(item.get("section_title", "") or "").lower()
+        text = _clean_text(item.get("text", ""))
+        if not text:
+            continue
+        title_hit = any(k in ch_title or k in sec_title for k in overview_keywords)
+        cue_hit = any(re.search(p, text.lower()) for p in cue_patterns)
+        if title_hit or cue_hit:
+            candidate_texts.append(text)
+        if len(candidate_texts) >= 6:
+            break
+
+    if not candidate_texts:
+        candidate_texts = [_clean_text(r.get("text", "")) for r in results if r.get("text")]
+
+    merged = " ".join(candidate_texts)
+    sents = [s.strip() for s in re.split(r"(?<=[.!?])\s+", merged) if s.strip()]
+    ranked = _rank_sentences_extractively(query, sents)
+    if not ranked:
+        return "No overview-style evidence was found."
+    selected = [ranked[0][1]]
+    for _, sent in ranked[1:]:
+        if sent.lower() in {x.lower() for x in selected}:
+            continue
+        selected.append(sent)
+        if len(selected) >= 2:
+            break
+    return " ".join(selected)
+
+
+def build_short_answer(query: str, results: list[dict], all_chunks: list[dict] | None = None) -> str:
     if not results:
         return "No relevant answer was found."
 
@@ -344,9 +466,11 @@ def build_short_answer(query: str, results: list[dict]) -> str:
     elif q_type == "location":
         answer = _pick_location_answer(query, results, candidates)
     elif q_type == "count":
-        answer = _pick_count_answer(query, results, candidates)
+        answer = _pick_count_answer(query, results, candidates, all_chunks)
     elif q_type == "summary":
         answer = _pick_summary_answer(query, candidates)
+    elif q_type == "overview":
+        answer = _pick_book_overview_answer(query, results, all_chunks)
     else:
         if not ranked:
             best = candidates[0]
