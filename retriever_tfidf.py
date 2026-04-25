@@ -2,7 +2,7 @@ import re
 
 import numpy as np
 from rank_bm25 import BM25Okapi
-from sentence_transformers import SentenceTransformer
+from sentence_transformers import CrossEncoder, SentenceTransformer
 
 
 def _normalize_scores(scores: np.ndarray) -> np.ndarray:
@@ -20,10 +20,18 @@ def _tokenize_for_bm25(text: str) -> list[str]:
 
 
 class HybridRetriever:
-    def __init__(self, embedding_model_name: str = "BAAI/bge-small-en-v1.5", bm25_weight: float = 0.45):
+    def __init__(
+        self,
+        embedding_model_name: str = "BAAI/bge-small-en-v1.5",
+        bm25_weight: float = 0.45,
+        reranker_model_name: str = "cross-encoder/ms-marco-MiniLM-L-6-v2",
+        rerank_candidates: int = 20,
+    ):
         self.embedding_model = SentenceTransformer(embedding_model_name)
+        self.reranker = CrossEncoder(reranker_model_name)
         self.bm25_weight = bm25_weight
         self.embedding_weight = 1.0 - bm25_weight
+        self.rerank_candidates = max(5, rerank_candidates)
         self.chunks: list[dict] = []
         self._tokenized_corpus: list[list[str]] = []
         self._bm25: BM25Okapi | None = None
@@ -57,20 +65,30 @@ class HybridRetriever:
         semantic_scores = _normalize_scores(semantic_scores)
 
         hybrid_scores = self.bm25_weight * bm25_scores + self.embedding_weight * semantic_scores
-        ranked_indices = np.argsort(hybrid_scores)[::-1][:top_k]
+        candidate_count = min(max(top_k, self.rerank_candidates), len(self.chunks))
+        candidate_indices = np.argsort(hybrid_scores)[::-1][:candidate_count]
+
+        rerank_pairs = [[query, self.chunks[idx]["text"]] for idx in candidate_indices]
+        rerank_scores = np.array(self.reranker.predict(rerank_pairs), dtype=float)
+        rerank_scores = _normalize_scores(rerank_scores)
+        reranked_order = np.argsort(rerank_scores)[::-1][:top_k]
 
         results = []
-        for idx in ranked_indices:
+        for local_idx in reranked_order:
+            idx = int(candidate_indices[local_idx])
             bm25_score = float(bm25_scores[idx])
             semantic_score = float(semantic_scores[idx])
             hybrid_score = float(hybrid_scores[idx])
+            rerank_score = float(rerank_scores[local_idx])
             results.append(
                 {
                     "page": self.chunks[idx]["page"],
                     "text": self.chunks[idx]["text"],
-                    "score": hybrid_score,
+                    "score": rerank_score,
                     "bm25_score": bm25_score,
                     "semantic_score": semantic_score,
+                    "hybrid_score": hybrid_score,
+                    "rerank_score": rerank_score,
                 }
             )
         return results
