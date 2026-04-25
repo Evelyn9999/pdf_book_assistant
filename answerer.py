@@ -293,6 +293,43 @@ def _pick_definition_answer(query: str, sentences: list[str], results: list[dict
     return ranked[0][1] if ranked else ""
 
 
+def _clean_definition_sentence(sentence: str) -> str:
+    text = sentence.strip()
+    # Remove heading-like prefixes and numbering noise.
+    text = re.sub(r"^(?:chapter|section)\s+\d+(?:\.\d+)*\s*[:\-]?\s*", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"^\d+(?:\.\d+)*\s+", "", text)
+    text = re.sub(r"\s+", " ", text).strip(" -:;,.")
+    return text
+
+
+def _definition_style_postprocess(query: str, answer: str) -> str:
+    cleaned = _clean_definition_sentence(answer)
+    subject = _extract_question_subject(query).strip()
+    if not subject:
+        return cleaned
+
+    lower_cleaned = cleaned.lower()
+    subject_lower = subject.lower()
+    has_definition_verb = any(k in lower_cleaned for k in [" is ", " are ", " refers to ", " defined as "])
+
+    # If extracted sentence already starts like a definition, just add source cue.
+    if has_definition_verb and (
+        lower_cleaned.startswith(subject_lower)
+        or lower_cleaned.startswith(f"a {subject_lower}")
+        or lower_cleaned.startswith(f"an {subject_lower}")
+        or lower_cleaned.startswith(f"the {subject_lower}")
+    ):
+        return f"According to the book, {cleaned[0].lower() + cleaned[1:] if len(cleaned) > 1 else cleaned}"
+
+    # Lightweight template wrapping without generation.
+    subject_display = subject[0].upper() + subject[1:] if subject else subject
+    if has_definition_verb:
+        # Keep sentence content, but force QA-style framing.
+        return f"According to the book, {subject_display} is described as {cleaned[0].lower() + cleaned[1:] if len(cleaned) > 1 else cleaned}"
+
+    return f"According to the book, {subject_display} is {cleaned[0].lower() + cleaned[1:] if len(cleaned) > 1 else cleaned}"
+
+
 def _extract_chapter_title(text: str) -> str:
     patterns = [
         r"\bchapter\s+\d+\s*[:\-]?\s*([a-zA-Z][^.;\n]{4,120})",
@@ -661,6 +698,8 @@ def build_short_answer_with_debug(
 
     if q_type == "definition":
         answer = _pick_definition_answer(query, candidates, results, all_chunks)
+        if answer:
+            answer = _definition_style_postprocess(query, answer)
     elif q_type == "location":
         answer = _pick_location_answer(query, results, candidates)
     elif q_type == "count":
