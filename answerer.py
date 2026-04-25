@@ -3,6 +3,8 @@ from collections import Counter
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
+UNRELIABLE_ANSWER = "I could not find a reliable direct answer. Please check the relevant passages below."
+
 
 def classify_question_type(query: str) -> str:
     q = query.strip().lower()
@@ -449,14 +451,113 @@ def _pick_book_overview_answer(query: str, results: list[dict], all_chunks: list
     return " ".join(selected)
 
 
-def build_short_answer(query: str, results: list[dict], all_chunks: list[dict] | None = None) -> str:
+def _has_definition_pattern(sentence: str, query: str) -> bool:
+    lower = sentence.lower()
+    subject = _extract_question_subject(query).lower().strip()
+    if not any(k in lower for k in [" is ", " are ", " refers to ", "defined as"]):
+        return False
+    if subject and subject not in lower:
+        subj_terms = _tokenize_for_match(subject)
+        sent_terms = _tokenize_for_match(sentence)
+        if len(subj_terms & sent_terms) < max(1, len(subj_terms) - 1):
+            return False
+    return True
+
+
+def _has_count_evidence(sentences: list[str]) -> bool:
+    values, _ = _extract_count_evidence(sentences)
+    if values:
+        return True
+    return any(re.search(r"\b\d+\b", s) for s in sentences)
+
+
+def _has_location_structure(results: list[dict]) -> bool:
     if not results:
-        return "No relevant answer was found."
+        return False
+    top = results[0]
+    return bool(top.get("chapter_number") or top.get("chapter_title") or top.get("section_number"))
+
+
+def _score_gate_reason(results: list[dict]) -> str:
+    if not results:
+        return "no_results"
+    top1 = float(results[0].get("score", 0.0))
+    if top1 < 0.2:
+        return "low_score"
+    if len(results) >= 2:
+        top2 = float(results[1].get("score", 0.0))
+        if (top1 - top2) < 0.03:
+            return "small_score_gap"
+    return "ok"
+
+
+def _get_unreliable_reason(
+    q_type: str,
+    answer: str,
+    query: str,
+    results: list[dict],
+    sentences: list[str],
+    all_chunks: list[dict] | None,
+) -> str:
+    if not answer or len(answer.strip()) < 20:
+        return "answer_too_short"
+    score_reason = _score_gate_reason(results)
+    if score_reason != "ok":
+        return score_reason
+
+    if q_type == "definition":
+        if not _has_definition_pattern(answer, query):
+            return "no_definition_pattern"
+        return "ok"
+
+    if q_type == "location":
+        if not _has_location_structure(results):
+            return "missing_location_structure"
+        return "ok"
+
+    if q_type == "count":
+        if all_chunks and ("how many chapters" in query.lower() or "number of chapters" in query.lower()):
+            ch_nums = {
+                int(c["chapter_number"])
+                for c in all_chunks
+                if c.get("chapter_number") is not None and str(c.get("chapter_number")).isdigit()
+            }
+            if len(ch_nums) >= 2:
+                return "ok"
+        if not _has_count_evidence(sentences):
+            return "no_numeric_evidence"
+        return "ok"
+
+    if q_type == "overview":
+        overview_cues = ["in this book", "this chapter", "overview", "introduction", "preface"]
+        lower = answer.lower()
+        if not (any(cue in lower for cue in overview_cues) or len(answer.split()) >= 12):
+            return "no_overview_cue"
+        return "ok"
+
+    if q_type == "summary":
+        if len(answer.split()) < 10:
+            return "summary_too_short"
+        return "ok"
+
+    return "ok"
+
+
+def build_short_answer(query: str, results: list[dict], all_chunks: list[dict] | None = None) -> str:
+    answer, _ = build_short_answer_with_debug(query, results, all_chunks)
+    return answer
+
+
+def build_short_answer_with_debug(
+    query: str, results: list[dict], all_chunks: list[dict] | None = None
+) -> tuple[str, str]:
+    if not results:
+        return "No relevant answer was found.", "no_results"
 
     candidates = _collect_candidate_sentences(results)
     if not candidates:
         fallback = _clean_text(results[0].get("text", ""))
-        return fallback[:280] + ("..." if len(fallback) > 280 else "")
+        return fallback[:280] + ("..." if len(fallback) > 280 else ""), "fallback_no_candidates"
 
     ranked = _rank_sentences_extractively(query, candidates)
     q_type = classify_question_type(query)
@@ -485,6 +586,9 @@ def build_short_answer(query: str, results: list[dict], all_chunks: list[dict] |
 
     if not answer:
         answer = candidates[0]
+    reason = _get_unreliable_reason(q_type, answer, query, results, candidates, all_chunks)
+    if reason != "ok":
+        return UNRELIABLE_ANSWER, reason
     if len(answer) > 320:
         answer = answer[:317].rstrip() + "..."
-    return answer
+    return answer, f"ok:{q_type}"

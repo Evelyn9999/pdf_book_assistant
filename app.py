@@ -8,7 +8,7 @@ from pypdf import PdfReader
 
 from chunker import chunk_pages
 from retriever_tfidf import HybridRetriever
-from answerer import build_short_answer, normalize_query_for_search
+from answerer import build_short_answer_with_debug, normalize_query_for_search
 from text_cleaner import clean_pdf_pages
 
 
@@ -180,8 +180,9 @@ class PdfAssistantApp(QWidget):
         search_query = normalize_query_for_search(query)
         results = self.retriever.search(search_query, top_k=3)
 
-        short_answer = build_short_answer(query, results, self.retriever.chunks)
+        short_answer, debug_reason = build_short_answer_with_debug(query, results, self.retriever.chunks)
         self.answer_output.setPlainText(short_answer)
+        self.status_label.setText(f"Status: Answer generated | debug: {debug_reason}")
 
         if not results:
             self.passages_output.setPlainText("No relevant passages found.")
