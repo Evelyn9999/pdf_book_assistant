@@ -7,7 +7,7 @@ from PySide6.QtWidgets import (
 from pypdf import PdfReader
 
 from chunker import chunk_pages
-from retriever_tfidf import TfidfRetriever
+from retriever_tfidf import HybridRetriever
 from answerer import build_short_answer, normalize_query_for_search
 from text_cleaner import clean_pdf_pages
 
@@ -48,7 +48,7 @@ class PdfLoadWorker(QObject):
                 overlap_words=75,
             )
 
-            retriever = TfidfRetriever()
+            retriever = HybridRetriever()
             self.progress.emit(95, "Building search index")
             retriever.fit(chunks)
             self.progress.emit(100, "Done")
@@ -65,7 +65,7 @@ class PdfAssistantApp(QWidget):
         self.resize(900, 700)
 
         self.file_path = ""
-        self.retriever = TfidfRetriever()
+        self.retriever = HybridRetriever()
         self._load_thread = None
         self._load_worker = None
 
@@ -154,7 +154,7 @@ class PdfAssistantApp(QWidget):
 
         self._load_thread.start()
 
-    def _on_load_success(self, retriever: TfidfRetriever, chunk_count: int):
+    def _on_load_success(self, retriever: HybridRetriever, chunk_count: int):
         self.retriever = retriever
         self.status_label.setText(f"Status: PDF loaded successfully ({chunk_count} chunks created)")
 

@@ -1,3 +1,5 @@
 pypdf
 scikit-learn
 PySide6
+rank-bm25
+sentence-transformers
