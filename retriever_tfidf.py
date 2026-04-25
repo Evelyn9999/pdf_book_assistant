@@ -33,6 +33,7 @@ class HybridRetriever:
         self.embedding_weight = 1.0 - bm25_weight
         self.rerank_candidates = max(5, rerank_candidates)
         self.chunks: list[dict] = []
+        self.chapter_index: list[dict] = []
         self._tokenized_corpus: list[list[str]] = []
         self._bm25: BM25Okapi | None = None
         self._embeddings: np.ndarray | None = None

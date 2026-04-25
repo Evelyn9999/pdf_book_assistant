@@ -49,13 +49,15 @@ def _extract_structure_from_heading(line: str) -> dict:
     }
 
     # CHAPTER 1 / Chapter 1: Computer Networks
-    chapter_match = re.search(
-        r"\bchapter\s+(\d{1,2})\b(?:\s*[:\-]?\s*(.*))?$",
+    chapter_match = re.match(
+        r"^\s*(?:chapter|CHAPTER)\s+(\d{1,2})\b(?:\s*[:\-]?\s*(.*))?$",
         text,
-        flags=re.IGNORECASE,
     )
     if chapter_match:
-        info["chapter_number"] = int(chapter_match.group(1))
+        ch_num = int(chapter_match.group(1))
+        if not (1 <= ch_num <= 50):
+            return info
+        info["chapter_number"] = ch_num
         title = (chapter_match.group(2) or "").strip(" -:;,.")
         if title:
             info["chapter_title"] = title
@@ -64,11 +66,20 @@ def _extract_structure_from_heading(line: str) -> dict:
     # 1.1 What Is the Internet?
     section_match = re.match(r"^(\d+\.\d+(?:\.\d+)*)\s+(.+)$", text)
     if section_match:
-        info["section_number"] = section_match.group(1).strip()
+        section_number = section_match.group(1).strip()
+        chapter_part = section_number.split(".")[0]
+        second_part = section_number.split(".")[1] if len(section_number.split(".")) > 1 else ""
+        if not chapter_part.isdigit():
+            return info
+        ch_num = int(chapter_part)
+        if not (1 <= ch_num <= 50):
+            return info
+        if second_part.isdigit() and int(second_part) > 50:
+            return info
+
+        info["section_number"] = section_number
         info["section_title"] = section_match.group(2).strip(" -:;,.")
-        chapter_part = info["section_number"].split(".")[0]
-        if chapter_part.isdigit():
-            info["chapter_number"] = int(chapter_part)
+        info["chapter_number"] = ch_num
         return info
 
     return info

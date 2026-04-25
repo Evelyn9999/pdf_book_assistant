@@ -49,15 +49,9 @@ def _section_label(chunk: dict) -> str:
     return ""
 
 
-def _handle_count(query: str, chunks: list[dict]) -> tuple[bool, str, str, list[dict]]:
+def _handle_count(query: str, chunks: list[dict], chapter_index: list[dict] | None) -> tuple[bool, str, str, list[dict]]:
     q = query.lower()
-    chapter_nums = sorted(
-        {
-            int(c["chapter_number"])
-            for c in chunks
-            if c.get("chapter_number") is not None and str(c.get("chapter_number")).isdigit()
-        }
-    )
+    chapter_nums = sorted({int(item["chapter_number"]) for item in (chapter_index or [])})
 
     if "how many chapters" in q or "number of chapters" in q:
         if not chapter_nums:
@@ -66,7 +60,19 @@ def _handle_count(query: str, chunks: list[dict]) -> tuple[bool, str, str, list[
             f"By scanning chapter headings, the book appears to have {len(chapter_nums)} chapter(s) "
             f"({', '.join(map(str, chapter_nums))})."
         )
-        evidence = [c for c in chunks if c.get("chapter_number") in chapter_nums[:3]][:3]
+        evidence = []
+        for item in (chapter_index or [])[:3]:
+            evidence.append(
+                {
+                    "page": item.get("page"),
+                    "chapter_number": item.get("chapter_number"),
+                    "chapter_title": item.get("title", ""),
+                    "section_number": "",
+                    "section_title": "",
+                    "text": f"Chapter {item.get('chapter_number')}: {item.get('title', '')}",
+                    "score": 1.0,
+                }
+            )
         return True, answer, "structured:chapter_count", evidence
 
     chapter_match = re.search(r"\bchapter\s+(\d+)\b", q)
@@ -127,11 +133,13 @@ def _handle_overview(query: str, chunks: list[dict]) -> tuple[bool, str, str, li
     return True, answer, "structured:overview", ranked[:3]
 
 
-def run_structured_channel(query: str, question_type: str, chunks: list[dict]) -> tuple[bool, str, str, list[dict]]:
+def run_structured_channel(
+    query: str, question_type: str, chunks: list[dict], chapter_index: list[dict] | None = None
+) -> tuple[bool, str, str, list[dict]]:
     if not chunks:
         return False, "", "", []
     if question_type == "count":
-        return _handle_count(query, chunks)
+        return _handle_count(query, chunks, chapter_index)
     if question_type == "location":
         return _handle_location(query, chunks)
     if question_type == "overview":

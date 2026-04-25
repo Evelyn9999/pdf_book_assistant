@@ -8,6 +8,7 @@ from pypdf import PdfReader
 
 from chunker import chunk_pages
 from retriever_tfidf import HybridRetriever
+from structure_index import extract_chapter_index
 from answerer import (
     OUT_OF_BOOK_ANSWER,
     build_short_answer_with_debug,
@@ -42,6 +43,7 @@ class PdfLoadWorker(QObject):
 
             self.progress.emit(65, "Cleaning extracted text")
             cleaned_texts = clean_pdf_pages(raw_page_texts)
+            chapter_index = extract_chapter_index(raw_page_texts)
             pages = [
                 {"page": i + 1, "text": cleaned_texts[i] if i < len(cleaned_texts) else ""}
                 for i in range(total_pages)
@@ -58,6 +60,7 @@ class PdfLoadWorker(QObject):
             retriever = HybridRetriever()
             self.progress.emit(95, "Building search index")
             retriever.fit(chunks)
+            retriever.chapter_index = chapter_index
             self.progress.emit(100, "Done")
             self.finished.emit(retriever, len(chunks))
         except Exception as e:
@@ -197,7 +200,7 @@ class PdfAssistantApp(QWidget):
             return
 
         handled, structured_answer, structured_debug, structured_results = run_structured_channel(
-            query, q_type, self.retriever.chunks
+            query, q_type, self.retriever.chunks, self.retriever.chapter_index
         )
 
         if handled:
