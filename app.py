@@ -8,7 +8,8 @@ from pypdf import PdfReader
 
 from chunker import chunk_pages
 from retriever_tfidf import HybridRetriever
-from answerer import build_short_answer_with_debug, normalize_query_for_search
+from answerer import build_short_answer_with_debug, classify_question_type, normalize_query_for_search
+from structured_channel import run_structured_channel
 from text_cleaner import clean_pdf_pages
 
 
@@ -177,12 +178,24 @@ class PdfAssistantApp(QWidget):
             self.answer_output.setPlainText("Please enter a question.")
             return
 
-        search_query = normalize_query_for_search(query)
-        results = self.retriever.search(search_query, top_k=3)
+        q_type = classify_question_type(query)
+        handled, structured_answer, structured_debug, structured_results = run_structured_channel(
+            query, q_type, self.retriever.chunks
+        )
 
-        short_answer, debug_reason = build_short_answer_with_debug(query, results, self.retriever.chunks)
+        if handled:
+            short_answer = structured_answer
+            debug_reason = structured_debug
+            results = structured_results
+            channel = "structured"
+        else:
+            search_query = normalize_query_for_search(query)
+            results = self.retriever.search(search_query, top_k=3)
+            short_answer, debug_reason = build_short_answer_with_debug(query, results, self.retriever.chunks)
+            channel = "semantic"
+
         self.answer_output.setPlainText(short_answer)
-        self.status_label.setText(f"Status: Answer generated | debug: {debug_reason}")
+        self.status_label.setText(f"Status: Answer generated | channel: {channel} | debug: {debug_reason}")
 
         if not results:
             self.passages_output.setPlainText("No relevant passages found.")
@@ -206,9 +219,9 @@ class PdfAssistantApp(QWidget):
                 structure_line += f": {section_title}" if section_num else f" | {section_title}"
 
             text_blocks.append(
-                f"[Result {i}] Page {result['page']} | Score: {result['score']:.3f}\n"
+                f"[Result {i}] Page {result.get('page', 'unknown')} | Score: {float(result.get('score', 0.0)):.3f}\n"
                 f"{structure_line}\n"
-                f"{result['text']}\n"
+                f"{result.get('text', '')}\n"
             )
 
         self.passages_output.setPlainText("\n\n".join(text_blocks))
