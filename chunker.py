@@ -39,6 +39,67 @@ def _split_long_paragraph(paragraph: str, max_words: int, overlap_words: int) ->
     return windows
 
 
+def _extract_structure_from_heading(line: str) -> dict:
+    text = line.strip()
+    info = {
+        "chapter_number": None,
+        "chapter_title": "",
+        "section_number": "",
+        "section_title": "",
+    }
+
+    # CHAPTER 1 / Chapter 1: Computer Networks
+    chapter_match = re.search(
+        r"\bchapter\s+(\d{1,2})\b(?:\s*[:\-]?\s*(.*))?$",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if chapter_match:
+        info["chapter_number"] = int(chapter_match.group(1))
+        title = (chapter_match.group(2) or "").strip(" -:;,.")
+        if title:
+            info["chapter_title"] = title
+        return info
+
+    # 1.1 What Is the Internet?
+    section_match = re.match(r"^(\d+\.\d+(?:\.\d+)*)\s+(.+)$", text)
+    if section_match:
+        info["section_number"] = section_match.group(1).strip()
+        info["section_title"] = section_match.group(2).strip(" -:;,.")
+        chapter_part = info["section_number"].split(".")[0]
+        if chapter_part.isdigit():
+            info["chapter_number"] = int(chapter_part)
+        return info
+
+    return info
+
+
+def _infer_page_structure(text: str, state: dict) -> dict:
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    chapter_number = state.get("chapter_number")
+    chapter_title = state.get("chapter_title", "")
+    section_number = state.get("section_number", "")
+    section_title = state.get("section_title", "")
+
+    for line in lines[:8]:
+        info = _extract_structure_from_heading(line)
+        if info["chapter_number"] is not None:
+            chapter_number = info["chapter_number"]
+        if info["chapter_title"]:
+            chapter_title = info["chapter_title"]
+        if info["section_number"]:
+            section_number = info["section_number"]
+        if info["section_title"]:
+            section_title = info["section_title"]
+
+    return {
+        "chapter_number": chapter_number,
+        "chapter_title": chapter_title,
+        "section_number": section_number,
+        "section_title": section_title,
+    }
+
+
 def chunk_pages(
     pages: list[dict],
     min_words: int = 400,
@@ -51,11 +112,21 @@ def chunk_pages(
     max_words = max(50, max_words)
     min_words = max(50, min(min_words, max_words))
 
+    structure_state = {
+        "chapter_number": None,
+        "chapter_title": "",
+        "section_number": "",
+        "section_title": "",
+    }
+
     for page_data in pages:
         page_num = page_data["page"]
         text = (page_data.get("text") or "").strip()
         if not text:
             continue
+
+        page_structure = _infer_page_structure(text, structure_state)
+        structure_state = page_structure.copy()
 
         paragraphs = _split_paragraphs(text)
         units = []
@@ -72,18 +143,48 @@ def chunk_pages(
                 continue
 
             if current:
-                chunks.append({"chunk_id": chunk_id, "page": page_num, "text": current.strip()})
+                chunks.append(
+                    {
+                        "chunk_id": chunk_id,
+                        "page": page_num,
+                        "text": current.strip(),
+                        "chapter_number": page_structure["chapter_number"],
+                        "chapter_title": page_structure["chapter_title"],
+                        "section_number": page_structure["section_number"],
+                        "section_title": page_structure["section_title"],
+                    }
+                )
                 chunk_id += 1
                 tail = _last_n_words(current, overlap_words)
                 current = f"{tail} {unit}".strip() if tail else unit
             else:
-                chunks.append({"chunk_id": chunk_id, "page": page_num, "text": unit.strip()})
+                chunks.append(
+                    {
+                        "chunk_id": chunk_id,
+                        "page": page_num,
+                        "text": unit.strip(),
+                        "chapter_number": page_structure["chapter_number"],
+                        "chapter_title": page_structure["chapter_title"],
+                        "section_number": page_structure["section_number"],
+                        "section_title": page_structure["section_title"],
+                    }
+                )
                 chunk_id += 1
                 current = ""
 
             # If overlap + unit still too long, flush immediately.
             if _count_words(current) > max_words:
-                chunks.append({"chunk_id": chunk_id, "page": page_num, "text": current.strip()})
+                chunks.append(
+                    {
+                        "chunk_id": chunk_id,
+                        "page": page_num,
+                        "text": current.strip(),
+                        "chapter_number": page_structure["chapter_number"],
+                        "chapter_title": page_structure["chapter_title"],
+                        "section_number": page_structure["section_number"],
+                        "section_title": page_structure["section_title"],
+                    }
+                )
                 chunk_id += 1
                 current = _last_n_words(current, overlap_words)
 
@@ -96,6 +197,10 @@ def chunk_pages(
                     chunks[-1]["text"] = merged
                     continue
             chunks.append({"chunk_id": chunk_id, "page": page_num, "text": current.strip()})
+            chunks[-1]["chapter_number"] = page_structure["chapter_number"]
+            chunks[-1]["chapter_title"] = page_structure["chapter_title"]
+            chunks[-1]["section_number"] = page_structure["section_number"]
+            chunks[-1]["section_title"] = page_structure["section_title"]
             chunk_id += 1
 
     return chunks

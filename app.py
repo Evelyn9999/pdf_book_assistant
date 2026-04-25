@@ -189,8 +189,24 @@ class PdfAssistantApp(QWidget):
 
         text_blocks = []
         for i, result in enumerate(results, start=1):
+            chapter_num = result.get("chapter_number")
+            chapter_title = result.get("chapter_title", "")
+            section_num = result.get("section_number", "")
+            section_title = result.get("section_title", "")
+
+            structure_line = ""
+            if chapter_num:
+                structure_line += f"Chapter {chapter_num}"
+            if chapter_title:
+                structure_line += f": {chapter_title}" if structure_line else chapter_title
+            if section_num:
+                structure_line += f" | Section {section_num}"
+            if section_title:
+                structure_line += f": {section_title}" if section_num else f" | {section_title}"
+
             text_blocks.append(
                 f"[Result {i}] Page {result['page']} | Score: {result['score']:.3f}\n"
+                f"{structure_line}\n"
                 f"{result['text']}\n"
             )
 

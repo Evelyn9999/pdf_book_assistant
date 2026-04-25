@@ -84,6 +84,10 @@ class HybridRetriever:
                 {
                     "page": self.chunks[idx]["page"],
                     "text": self.chunks[idx]["text"],
+                    "chapter_number": self.chunks[idx].get("chapter_number"),
+                    "chapter_title": self.chunks[idx].get("chapter_title", ""),
+                    "section_number": self.chunks[idx].get("section_number", ""),
+                    "section_title": self.chunks[idx].get("section_title", ""),
                     "score": rerank_score,
                     "bm25_score": bm25_score,
                     "semantic_score": semantic_score,

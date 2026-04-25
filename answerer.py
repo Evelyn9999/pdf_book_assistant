@@ -186,12 +186,32 @@ def _pick_location_answer(query: str, results: list[dict], sentences: list[str])
 
     top_result = results[0]
     page = top_result.get("page", "unknown")
+    chapter_num = top_result.get("chapter_number")
+    chapter_title = (top_result.get("chapter_title") or "").strip()
+    section_num = (top_result.get("section_number") or "").strip()
+    section_title = (top_result.get("section_title") or "").strip()
     title = _extract_chapter_title(top_result.get("text", "")) or _extract_chapter_title(best_sentence)
-    if not title:
-        title = "No explicit chapter title found"
+
+    if chapter_num and chapter_title:
+        chapter_label = f"Chapter {chapter_num}: {chapter_title}"
+    elif chapter_num:
+        chapter_label = f"Chapter {chapter_num}"
+    elif chapter_title:
+        chapter_label = chapter_title
+    elif title:
+        chapter_label = title
+    else:
+        chapter_label = "Unknown chapter"
+
+    if section_num and section_title:
+        section_label = f"{section_num} {section_title}"
+    elif section_num:
+        section_label = section_num
+    else:
+        section_label = "N/A"
 
     snippet = best_sentence.strip()
-    return f"Chapter/Section: {title} | Page: {page} | Snippet: {snippet}"
+    return f"Chapter: {chapter_label} | Section: {section_label} | Page: {page} | Snippet: {snippet}"
 
 
 def _word_to_int(token: str) -> int | None:
@@ -249,6 +269,19 @@ def _extract_count_evidence(sentences: list[str]) -> tuple[list[int], list[str]]
 
 
 def _pick_count_answer(query: str, results: list[dict], sentences: list[str]) -> str:
+    chapter_numbers = sorted(
+        {
+            int(item["chapter_number"])
+            for item in results
+            if item.get("chapter_number") is not None and str(item.get("chapter_number")).isdigit()
+        }
+    )
+    if "chapter" in query.lower() and chapter_numbers:
+        return (
+            f"From the retrieved structured headings, I can identify chapters: {', '.join(map(str, chapter_numbers))}. "
+            f"Current evidence indicates at least {len(chapter_numbers)} chapter(s)."
+        )
+
     values, evidence = _extract_count_evidence(sentences)
     if len(values) >= 2:
         total = sum(values[:2])
