@@ -1,4 +1,6 @@
 import re
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
 
 
 def normalize_query_for_search(query: str) -> str:
@@ -59,105 +61,76 @@ def _tokenize_for_match(text: str) -> set[str]:
     return set(re.findall(r"[a-zA-Z][a-zA-Z0-9_-]{2,}", text.lower()))
 
 
-def _best_sentence(candidates: list[str], query: str) -> str:
-    if not candidates:
-        return ""
+def _collect_candidate_sentences(results: list[dict]) -> list[str]:
+    candidates: list[str] = []
+    seen = set()
+    for item in results[:3]:
+        cleaned = _clean_text(item.get("text", ""))
+        if not cleaned:
+            continue
+        sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", cleaned) if s.strip()]
+        for sentence in sentences:
+            key = sentence.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            if _is_noise_sentence(sentence):
+                continue
+            if len(sentence) < 25:
+                continue
+            candidates.append(sentence)
+    return candidates
+
+
+def _rank_sentences_extractively(query: str, sentences: list[str]) -> list[tuple[float, str]]:
+    if not sentences:
+        return []
+
+    vectorizer = TfidfVectorizer(stop_words="english", ngram_range=(1, 2))
+    matrix = vectorizer.fit_transform([query] + sentences)
+    q_vec = matrix[0:1]
+    s_vec = matrix[1:]
+    tfidf_scores = cosine_similarity(q_vec, s_vec).flatten()
 
     subject = _extract_question_subject(query)
     query_terms = _tokenize_for_match(subject if subject else query)
-    if not query_terms:
-        return candidates[0]
 
-    subject_text = _extract_question_subject(query)
-    subject_terms = _tokenize_for_match(subject_text)
-    scored = []
-    for sentence in candidates:
-        if _is_noise_sentence(sentence):
-            continue
+    ranked: list[tuple[float, str]] = []
+    for idx, sentence in enumerate(sentences):
         sentence_terms = _tokenize_for_match(sentence)
-        overlap = len(sentence_terms & query_terms)
-        bonus = 0
-        lower = sentence.lower()
-        if " is " in lower or " are " in lower:
-            bonus += 3
-        if " refers to " in lower or "defined as" in lower:
-            bonus += 4
-        if subject_text and subject_text in lower:
-            bonus += 4
-        if subject_terms and len(subject_terms & sentence_terms) >= max(1, len(subject_terms) - 1):
-            bonus += 3
-        if " is a " in lower or " are a " in lower or " is an " in lower:
-            bonus += 2
-        scored.append((overlap, bonus, len(sentence), sentence))
+        overlap = len(query_terms & sentence_terms) / max(1, len(query_terms))
+        # Keep this extractive: no rewriting, only scoring bonuses.
+        score = (0.75 * float(tfidf_scores[idx])) + (0.25 * overlap)
+        ranked.append((score, sentence))
 
-    if not scored:
-        return ""
-    scored.sort(key=lambda item: (item[0], item[1], -abs(item[2] - 170)), reverse=True)
-    return scored[0][3]
-
-
-def _build_definition_answer(query: str, sentences: list[str]) -> str:
-    subject = _extract_question_subject(query)
-    if not subject:
-        return ""
-
-    subject_terms = [t for t in re.findall(r"[a-zA-Z][a-zA-Z0-9_-]{2,}", subject.lower())]
-    if not subject_terms:
-        return ""
-
-    # First pass: strict definition-style sentence.
-    for sentence in sentences:
-        lower = sentence.lower()
-        if _is_noise_sentence(sentence):
-            continue
-        if all(term in lower for term in subject_terms) and (
-            " is " in lower
-            or " are " in lower
-            or " refers to " in lower
-            or "defined as" in lower
-        ):
-            return sentence
-
-    # Second pass: best candidate and rewrite into a direct definition.
-    best = _best_sentence(sentences, query)
-    if not best:
-        return ""
-
-    # Fall back to a direct, readable definition template.
-    subject_text = subject.strip().rstrip("?.!")
-    if subject_text and not subject_text[0].isupper():
-        subject_text = subject_text[0].upper() + subject_text[1:]
-    cleaned_best = best.rstrip(". ").lower()
-    cleaned_best = re.sub(r"^(we|this|it)\s+", "", cleaned_best)
-    return f"{subject_text} is {cleaned_best}."
+    ranked.sort(key=lambda x: x[0], reverse=True)
+    return ranked
 
 
 def build_short_answer(query: str, results: list[dict]) -> str:
     if not results:
         return "No relevant answer was found."
 
-    merged_text = " ".join(_clean_text(item.get("text", "")) for item in results[:3]).strip()
-    if not merged_text:
-        return "No relevant answer was found."
+    candidates = _collect_candidate_sentences(results)
+    if not candidates:
+        fallback = _clean_text(results[0].get("text", ""))
+        return fallback[:280] + ("..." if len(fallback) > 280 else "")
 
-    # Basic sentence split tuned for PDF output.
-    sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", merged_text) if s.strip()]
-    lower_query = query.strip().lower()
-    if lower_query.startswith("what is ") or lower_query.startswith("define "):
-        best = _build_definition_answer(query, sentences)
-    else:
-        best = _best_sentence(sentences, query)
+    ranked = _rank_sentences_extractively(query, candidates)
+    if not ranked:
+        best = candidates[0]
+        return best[:280] + ("..." if len(best) > 280 else "")
 
-    if not best:
-        subject = _extract_question_subject(query)
-        if subject and "network" in subject:
-            best = (
-                f"{subject.capitalize()} is a set of interconnected devices and systems "
-                "that exchange data through communication links and protocols."
-            )
-        else:
-            best = merged_text[:260]
+    best_score, best_sentence = ranked[0]
+    selected = [best_sentence]
 
-    if len(best) > 280:
-        best = best[:277].rstrip() + "..."
-    return best
+    # Return two sentences only when both are clearly relevant.
+    if len(ranked) > 1:
+        second_score, second_sentence = ranked[1]
+        if second_score >= 0.65 * best_score and second_score >= 0.08:
+            selected.append(second_sentence)
+
+    answer = " ".join(selected).strip()
+    if len(answer) > 320:
+        answer = answer[:317].rstrip() + "..."
+    return answer
