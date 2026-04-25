@@ -8,7 +8,13 @@ from pypdf import PdfReader
 
 from chunker import chunk_pages
 from retriever_tfidf import HybridRetriever
-from answerer import build_short_answer_with_debug, classify_question_type, normalize_query_for_search
+from answerer import (
+    OUT_OF_BOOK_ANSWER,
+    build_short_answer_with_debug,
+    classify_question_type,
+    domain_gate_with_reason,
+    normalize_query_for_search,
+)
 from structured_channel import run_structured_channel
 from text_cleaner import clean_pdf_pages
 
@@ -179,6 +185,17 @@ class PdfAssistantApp(QWidget):
             return
 
         q_type = classify_question_type(query)
+
+        # Domain gate: reject obviously book-external questions early.
+        gate_query = normalize_query_for_search(query)
+        gate_results = self.retriever.search(gate_query, top_k=3)
+        is_in_domain, gate_reason = domain_gate_with_reason(query, gate_results, self.retriever.chunks)
+        if not is_in_domain:
+            self.answer_output.setPlainText(OUT_OF_BOOK_ANSWER)
+            self.status_label.setText(f"Status: Answer generated | channel: gate | debug: {gate_reason}")
+            self.passages_output.setPlainText("No relevant passages found for this book-related scope.")
+            return
+
         handled, structured_answer, structured_debug, structured_results = run_structured_channel(
             query, q_type, self.retriever.chunks
         )

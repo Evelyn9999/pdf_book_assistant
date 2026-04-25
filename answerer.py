@@ -4,6 +4,10 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
 UNRELIABLE_ANSWER = "I could not find a reliable direct answer. Please check the relevant passages below."
+OUT_OF_BOOK_ANSWER = (
+    "I could not find a reliable answer to this question in the current book.\n"
+    "Please ask about the content of the loaded PDF."
+)
 
 
 def classify_question_type(query: str) -> str:
@@ -91,6 +95,48 @@ def _extract_question_subject(query: str) -> str:
 
 def _tokenize_for_match(text: str) -> set[str]:
     return set(re.findall(r"[a-zA-Z][a-zA-Z0-9_-]{2,}", text.lower()))
+
+
+def _is_system_style_query(query: str) -> bool:
+    q = query.strip().lower()
+    patterns = [
+        r"\bare you\b",
+        r"\bwho are you\b",
+        r"\btell me about yourself\b",
+        r"\bwhat are you\b",
+        r"\bhow are you\b",
+        r"\bwhat is your name\b",
+    ]
+    return any(re.search(p, q) for p in patterns)
+
+
+def domain_gate_with_reason(query: str, results: list[dict], all_chunks: list[dict] | None = None) -> tuple[bool, str]:
+    if _is_system_style_query(query):
+        return False, "domain_system_query"
+
+    query_terms = _tokenize_for_match(query)
+    if len(query_terms) < 2:
+        return False, "domain_query_too_generic"
+
+    title_terms = set()
+    if all_chunks:
+        for chunk in all_chunks[:500]:
+            title_terms |= _tokenize_for_match(str(chunk.get("chapter_title", "") or ""))
+            title_terms |= _tokenize_for_match(str(chunk.get("section_title", "") or ""))
+    title_overlap = len(query_terms & title_terms)
+
+    content_terms = set()
+    for item in results[:3]:
+        content_terms |= _tokenize_for_match(str(item.get("text", "") or ""))
+    content_overlap = len(query_terms & content_terms)
+
+    # Domain gate: reject if both structure and top-content signals are weak.
+    if title_overlap == 0 and content_overlap == 0:
+        return False, "domain_no_overlap"
+    if title_overlap == 0 and content_overlap <= 1 and len(query_terms) >= 4:
+        return False, "domain_low_overlap"
+
+    return True, "domain_ok"
 
 
 def _collect_candidate_sentences(results: list[dict]) -> list[str]:
